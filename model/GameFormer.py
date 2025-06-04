@@ -31,19 +31,19 @@ class Encoder(nn.Module):
 
     def forward(self, inputs):
         # agent encoding
-        ego = inputs['ego_state']
-        neighbors = inputs['neighbors_state']
-        actors = torch.cat([inputs['ego_state'].unsqueeze(1), neighbors], dim=1)
-        encoded_ego = self.ego_encoder(ego)
-        encoded_neighbors = [self.agent_encoder(neighbors[:, i]) for i in range(neighbors.shape[1])]
-        encoded_actors = torch.stack([encoded_ego] + encoded_neighbors, dim=1)
+        ego = inputs['ego_state'] # [64,11,9]
+        neighbors = inputs['neighbors_state'] # [64,33,11,9] 
+        actors = torch.cat([inputs['ego_state'].unsqueeze(1), neighbors], dim=1) # [64,34,11,9]
+        encoded_ego = self.ego_encoder(ego) # [64,256]
+        encoded_neighbors = [self.agent_encoder(neighbors[:, i]) for i in range(neighbors.shape[1])] # 33×[64,256]
+        encoded_actors = torch.stack([encoded_ego] + encoded_neighbors, dim=1) # [64, 5, 256]
         actors_mask = torch.eq(actors[:, :, -1].sum(-1), 0)
 
         # map encoding
         map_lanes = inputs['map_lanes']
         map_crosswalks = inputs['map_crosswalks']
-        encoded_map_lanes = self.lane_encoder(map_lanes)
-        encoded_map_crosswalks = self.crosswalk_encoder(map_crosswalks)
+        encoded_map_lanes = self.lane_encoder(map_lanes) # [64,2,6,100,256]
+        encoded_map_crosswalks = self.crosswalk_encoder(map_crosswalks) # [64,2,4,50,256]
 
         # attention fusion
         encodings = []
@@ -51,17 +51,17 @@ class Encoder(nn.Module):
         N = self._neighbors + 1
         assert actors.shape[1] >= N, 'Too many neighbors to predict'
 
-        for i in range(N):
-            lanes, lanes_mask = self.segment_map(map_lanes[:, i], encoded_map_lanes[:, i])
-            crosswalks, crosswalks_mask = self.segment_map(map_crosswalks[:, i], encoded_map_crosswalks[:, i])
-            fusion_input = torch.cat([encoded_actors, lanes, crosswalks], dim=1)
+        for i in range(N): # N=2,自车+其他车的联合预测
+            lanes, lanes_mask = self.segment_map(map_lanes[:, i], encoded_map_lanes[:, i]) # [64,60, 256]
+            crosswalks, crosswalks_mask = self.segment_map(map_crosswalks[:, i], encoded_map_crosswalks[:, i]) # [64,20,256]
+            fusion_input = torch.cat([encoded_actors, lanes, crosswalks], dim=1) # [64,114,256]
             mask = torch.cat([actors_mask, lanes_mask, crosswalks_mask], dim=1)
             masks.append(mask)
             encoding = self.fusion_encoder(fusion_input, src_key_padding_mask=mask)
             encodings.append(encoding)
 
         # outputs
-        encodings = torch.stack(encodings, dim=1)
+        encodings = torch.stack(encodings, dim=1) # 2 × [64,114,256]
         masks = torch.stack(masks, dim=1)
         encoder_outputs = {
             'actors': actors,

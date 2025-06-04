@@ -13,6 +13,7 @@ from waymo_open_dataset.metrics.python import config_util_py as config_util
 from waymo_open_dataset.protos import motion_metrics_pb2
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+# os.environ["CUDA_VISIBLE_DEVICES"] = " "
 import random
 
 
@@ -176,7 +177,7 @@ def default_metrics_config():
 
 class MotionMetrics:
     """Wrapper for motion metrics computation."""
-    def __init__(self):
+    def __init__(self, gpu_device="0"):
         super().__init__()
         self._ground_truth_trajectory = []
         self._ground_truth_is_valid = []
@@ -184,6 +185,11 @@ class MotionMetrics:
         self._prediction_score = []
         self._object_type = []
         self._metrics_config = default_metrics_config()
+        print(f"use gpu {gpu_device}")
+        self._gpu_device = gpu_device
+        gpu_id = int(gpu_device)
+        gpus = tf.config.experimental.list_physical_devices(device_type='GPU')
+        tf.config.experimental.set_visible_devices(devices=gpus[gpu_id], device_type='GPU')
 
     def reset_states(self):
         self._ground_truth_trajectory = []
@@ -231,24 +237,24 @@ class MotionMetrics:
         # [batch_size, num_agents_per_joint_prediction].
         object_type = object_type.numpy()
         b = ground_truth_trajectory.shape[0]
+        print("data convert")
+        with tf.device(f'/device:GPU:{self._gpu_device}'):
+            prediction_ground_truth_indices = tf.cast(tf.concat([tf.zeros((b, 1, 1)), tf.ones((b, 1, 1))],axis=-1),tf.int64)
+            ground_truth_is_valid = tf.convert_to_tensor(ground_truth_is_valid)
+            prediction_ground_truth_indices_mask = tf.ones_like(prediction_ground_truth_indices, dtype=tf.float32)
+            valid_gt_all = tf.cast(tf.math.greater_equal(tf.reduce_sum(tf.cast(ground_truth_is_valid,tf.float32), axis=-1), 1), tf.float32)
+            valid_gt_all = valid_gt_all[:, tf.newaxis, :] * prediction_ground_truth_indices_mask
+            valid_gt_all = tf.cast(valid_gt_all, tf.bool)
 
-        prediction_ground_truth_indices = tf.cast(tf.concat([tf.zeros((b, 1, 1)), tf.ones((b, 1, 1))],axis=-1),tf.int64)
-        # print(object_type.shape)
-        ground_truth_is_valid = tf.convert_to_tensor(ground_truth_is_valid)
-        prediction_ground_truth_indices_mask = tf.ones_like(prediction_ground_truth_indices, dtype=tf.float32)
-        valid_gt_all = tf.cast(tf.math.greater_equal(tf.reduce_sum(tf.cast(ground_truth_is_valid,tf.float32), axis=-1), 1), tf.float32)
-        valid_gt_all = valid_gt_all[:, tf.newaxis, :] * prediction_ground_truth_indices_mask
-        valid_gt_all = tf.cast(valid_gt_all, tf.bool)
-
-        metric_values = py_metrics_ops.motion_metrics(
-                config=self._metrics_config.SerializeToString(),
-                prediction_trajectory=tf.convert_to_tensor(prediction_trajectory),
-                prediction_score=tf.convert_to_tensor(prediction_score),
-                ground_truth_trajectory=tf.convert_to_tensor(ground_truth_trajectory),
-                ground_truth_is_valid=ground_truth_is_valid,
-                object_type=tf.convert_to_tensor(object_type),
-                prediction_ground_truth_indices=prediction_ground_truth_indices,
-                prediction_ground_truth_indices_mask=valid_gt_all)
+            metric_values = py_metrics_ops.motion_metrics(
+                    config=self._metrics_config.SerializeToString(),
+                    prediction_trajectory=tf.convert_to_tensor(prediction_trajectory),
+                    prediction_score=tf.convert_to_tensor(prediction_score),
+                    ground_truth_trajectory=tf.convert_to_tensor(ground_truth_trajectory),
+                    ground_truth_is_valid=ground_truth_is_valid,
+                    object_type=tf.convert_to_tensor(object_type),
+                    prediction_ground_truth_indices=prediction_ground_truth_indices,
+                    prediction_ground_truth_indices_mask=valid_gt_all)
 
 
         metric_names = config_util.get_breakdown_names_from_motion_config(self._metrics_config)

@@ -114,7 +114,7 @@ class FutureEncoder(nn.Module):
         trajs = self.state_process(trajs, current_states)
         trajs = self.mlp(trajs.detach())
         type = self.type_emb(current_states[:, :, None, 8].int())
-        output = torch.max(trajs, dim=-2).values
+        output = torch.mean(trajs, dim=-2)
         output = output + type
 
         return output

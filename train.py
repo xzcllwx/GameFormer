@@ -1,6 +1,6 @@
 import torch
 import sys
-sys.path.append('/root/xzcllwx_ws/GameFormer')
+sys.path.append('..')
 import csv
 import argparse
 from torch import optim
@@ -12,6 +12,9 @@ from torch.utils.data import DataLoader
 import time
 from model.GameFormer import GameFormer
 from utils.inter_pred_utils import *
+
+def is_main_process():
+    return dist.get_rank() == 0
 
 
 # define model training epoch
@@ -27,14 +30,14 @@ def training_epoch(train_data, model, optimizer, epoch):
     for batch in train_data:
         # prepare data
         inputs = {
-            'ego_state': batch[0].to(args.local_rank),
-            'neighbors_state': batch[1].to(args.local_rank),
-            'map_lanes': batch[2].to(args.local_rank),
-            'map_crosswalks': batch[3].to(args.local_rank),
+            'ego_state': batch[0].to(args.local_rank, non_blocking=True), # [64,11,9] x,y,heading,vx,vy,l,w,h,type
+            'neighbors_state': batch[1].to(args.local_rank, non_blocking=True), # [64,33,11,9] x,y,heading,vx,vy,l,w,h,type
+            'map_lanes': batch[2].to(args.local_rank, non_blocking=True), # [64,2,6,100,17] self_point (x, y, h), left_boundary_point (x, y, h), right_boundary_pont (x, y, h), speed limit (float), self_type (int), left_boundary_type (int), right_boundary_type (int), traffic light (int), stop_point (bool), interpolating (bool), stop_sign (bool)
+            'map_crosswalks': batch[3].to(args.local_rank, non_blocking=True), # [64,2,4,50,3] x,y,yaw
         }
 
-        ego_future = batch[4].to(args.local_rank)
-        neighbor_future = batch[5].to(args.local_rank)
+        ego_future = batch[4].to(args.local_rank, non_blocking=True) # [64,80,5] x,y,yaw,vx,vy
+        neighbor_future = batch[5].to(args.local_rank, non_blocking=True) # [64,80,5]
 
         # zero gradients for every batch
         optimizer.zero_grad()
@@ -56,7 +59,7 @@ def training_epoch(train_data, model, optimizer, epoch):
         current += args.batch_size
         epoch_loss.append(loss.item())
 
-        if dist.get_rank() == 0:
+        if is_main_process():
             logging.info(
                 f"\rTrain Progress: [{current:>6d}/{size*args.batch_size:>6d}]"+
                 f"|Loss: {np.mean(epoch_loss):>.4f}|"+
@@ -78,8 +81,8 @@ def validation_epoch(valid_data, model, epoch):
     epoch_loss = []
     ADE,FDE = [],[]
     ADEp,FDEp = [],[]
-
-    logging.info(f'Validation...Epoch{epoch+1}')
+    if is_main_process():
+        logging.info(f'Validation...Epoch{epoch+1}')
 
     for batch in valid_data:
         # prepare data
@@ -96,7 +99,7 @@ def validation_epoch(valid_data, model, epoch):
         # query the model
         with torch.no_grad():
             outputs = model(inputs)
-            loss,future = lewvel_k_loss(outputs, ego_future, neighbor_future, args.level)
+            loss,future = level_k_loss(outputs, ego_future, neighbor_future, args.level)
 
         # compute metrics
         epoch_loss.append(loss.item())
@@ -131,7 +134,7 @@ def validation_epoch(valid_data, model, epoch):
                     )
 
         current += args.batch_size
-        if dist.get_rank() == 0:
+        if is_main_process():
             logging.info(
                 f"\rTrain Progress: [{current:>6d}/{size*args.batch_size:>6d}]"+
                 f"|Loss: {np.mean(epoch_loss):>.4f}|"+
@@ -140,26 +143,28 @@ def validation_epoch(valid_data, model, epoch):
                 f"{(time.time()-start_time)/current:>.4f}s/sample"
                 )
         
-    epoch_metrics = epoch_metrics.result()
+    # epoch_metrics = epoch_metrics.result()
     
-    return epoch_metrics, epoch_loss
+    return epoch_metrics.result(), epoch_loss
 
 # Define model training process
 def main():
-
-    log_path = f"./training_log/{args.name}/"
-    os.makedirs(log_path, exist_ok=True)
-    initLogging(log_file=log_path+'train.log')
-
-    logging.info("------------- {} -------------".format(args.name))
-    logging.info("Batch size: {}".format(args.batch_size))
-    logging.info("Learning rate: {}".format(args.learning_rate))
-    logging.info("Use device: {}".format(args.local_rank))
 
     set_seed(args.seed)
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend='nccl')
+
+    if is_main_process():
+        log_path = f"./training_log/{args.name}/"
+        os.makedirs(log_path, exist_ok=True)
+        initLogging(log_file=log_path+'train.log')
+
+        logging.info("------------- {} -------------".format(args.name))
+        logging.info("Batch size: {}".format(args.batch_size))
+        logging.info("Learning rate: {}".format(args.learning_rate))
+        logging.info("Use device: {}".format(args.local_rank))
+
 
     model = GameFormer(
                 modalities=args.modalities,
@@ -176,14 +181,14 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
     scheduler = optim.lr_scheduler.MultiStepLR(
                                             optimizer, 
-                                            milestones=[15, 18, 21, 24, 26, 28], 
+                                            milestones=[15, 18, 21, 24, 27], 
                                             gamma=0.5,
                                             verbose=True)
     
     # load ckpts:
     curr_ep = 0
     if args.load_dir != '':
-        model_path = args.load_dir
+        model_path = log_path + args.load_dir
         model_ckpts = torch.load(model_path, map_location='cpu')
         model.load_state_dict(model_ckpts['model_states'])
         optimizer.load_state_dict(model_ckpts['optim_states'])
@@ -197,17 +202,18 @@ def main():
     training_size = len(train_dataset)
     valid_size = len(valid_dataset)
 
-    if dist.get_rank() == 0:
+    if is_main_process():
         logging.info(f'Length train: {training_size}; Valid: {valid_size}')
 
     train_sampler = DistributedSampler(train_dataset)
     valid_sampler = DistributedSampler(valid_dataset, shuffle=False)
     train_data = DataLoader(
         train_dataset, batch_size=args.batch_size, 
-        sampler=train_sampler, num_workers=args.workers
+        sampler=train_sampler, num_workers=args.workers,
+        pin_memory=True, prefetch_factor=8
         )
     valid_data = DataLoader(
-        valid_dataset, batch_size=args.batch_size,
+        valid_dataset, batch_size=32,
         sampler=valid_sampler, num_workers=args.workers
         )
 
@@ -215,7 +221,7 @@ def main():
     epochs = args.training_epochs
 
     for epoch in range(epochs):
-        if dist.get_rank() == 0:
+        if is_main_process():
             logging.info(f"Epoch {epoch+1}/{epochs}")
         
         if epoch<=curr_ep and epoch!=0:
@@ -226,19 +232,19 @@ def main():
 
         train_loss = training_epoch(train_data, model, optimizer, epoch)
         dist.barrier()
-        valid_metrics, val_loss = validation_epoch(valid_data, model, epoch)
-
+        valid_metrics, val_loss = validation_epoch(valid_data, model.module, epoch)
+        
         # save to training log
-        log = {
-            'epoch': epoch+1, 
-            'train_loss': np.mean(train_loss), 
-            'val_loss': np.mean(val_loss),
-            'lr': optimizer.param_groups[0]['lr']
-            }
+        if is_main_process():
+            log = {
+                'epoch': epoch+1, 
+                'train_loss': np.mean(train_loss), 
+                'val_loss': np.mean(val_loss),
+                'lr': optimizer.param_groups[0]['lr']
+                }
 
-        log.update(valid_metrics)
+            log.update(valid_metrics)
 
-        if dist.get_rank() == 0:
             # log & save
             if epoch == 0:
                 with open(log_path + f'train_log.csv', 'w') as csv_file: 
@@ -249,16 +255,16 @@ def main():
                 with open(log_path + f'train_log.csv', 'a') as csv_file: 
                     writer = csv.writer(csv_file)
                     writer.writerow(log.values())
-            
             save_state = {
                 'optim_states' : optimizer.state_dict(),
-                'model_states' :model.state_dict(),
+                'model_states' :model.module.state_dict(),
                 'current_ep': epoch
             }
             torch.save(save_state, log_path + f'epochs_{epoch}.pth')
-        dist.barrier()
+            
         # adjust learning rate
         scheduler.step()
+        dist.barrier()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Interaction Prediction Training')
@@ -281,5 +287,5 @@ if __name__ == "__main__":
     parser.add_argument("--future_len", type=int, help='prediction horizons', default=80)
     parser.add_argument("--encoder_layers", type=int, help='encoder layers', default=6)
     args = parser.parse_args()
-
+    print(args)
     main()

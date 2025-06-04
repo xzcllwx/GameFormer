@@ -1,4 +1,5 @@
 import glob
+import os
 import sys
 sys.path.append("..")
 import argparse
@@ -11,8 +12,13 @@ from tqdm import tqdm
 from shapely.geometry import LineString, Point, Polygon
 from shapely.affinity import affine_transform, rotate
 from waymo_open_dataset.protos import scenario_pb2
+
+# full_path = os.path.realpath(__file__)
+to_add = os.path.abspath('/root/xzcllwx_ws/GameFormer/')
+sys.path.append(to_add)
+
 from utils.data_utils import *
-import os
+# import os
 import pickle
 
 tf.config.set_visible_devices([], 'GPU')
@@ -453,7 +459,9 @@ class DataProcess(object):
             self.build_points()
 
         for data_file in self.data_files:
+            print(f"Processing {data_file}")
             dataset = tf.data.TFRecordDataset(data_file)
+            dataset = dataset.apply(tf.data.experimental.ignore_errors())
             self.pbar = tqdm(total=len(list(dataset)))
             self.pbar.set_description(f"Processing {data_file.split('/')[-1]}")
 
@@ -500,8 +508,8 @@ class DataProcess(object):
                     object_index = np.array([ego_index, neighbor_index])
 
                     neighbors, _ = self.neighbors_process(sdc_ids, parsed_data.tracks)
-                    map_lanes = np.zeros(shape=(2, 6, 300, 17), dtype=np.float32)
-                    map_crosswalks = np.zeros(shape=(2, 4, 100, 3), dtype=np.float32)
+                    map_lanes = np.zeros(shape=(2, 6, 300, 17), dtype=np.float32) # 6 lanes, 300 points, 17 features
+                    map_crosswalks = np.zeros(shape=(2, 4, 100, 3), dtype=np.float32) # 4 crosswalks, 100 points, 3 features(x,y,heading)
                     map_lanes[0], map_crosswalks[0] = self.map_process(ego[0])
                     map_lanes[1], map_crosswalks[1] = self.map_process(ego[1])
 
@@ -553,7 +561,9 @@ if __name__ == "__main__":
     debug = args.debug
     test = args.test
     os.makedirs(save_path, exist_ok=True)
-
+    # 打印data_files的长度
+    print(len(data_files))
+    print(f"visualize data: {debug}")
     if args.use_multiprocessing:
         with Pool(processes=args.processes) as p:
             p.map(parallel_process, data_files)
